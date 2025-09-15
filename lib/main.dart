@@ -31,10 +31,12 @@ class MyApp extends StatelessWidget {
 // HAPUS DataType.pvc
 enum DataType { hr, rr, ecg, acc }
 
+// Replace the existing SensorData and CsvHelper classes with these modified versions
+
 class SensorData {
   final DataType type;
   final double value;
-  final DateTime timestamp; // Tetap menggunakan DateTime untuk manipulasi di Flutter
+  final DateTime timestamp;
   final Map<String, dynamic> additionalData;
 
   SensorData({
@@ -43,51 +45,49 @@ class SensorData {
     required this.timestamp,
     this.additionalData = const {},
   });
+}
 
-  // PERBAIKAN 1: Gunakan Unix Timestamp (detik sejak epoch)
+// New combined row data structure
+class CombinedRowData {
+  final DateTime timestamp;
+  final String deviceId;
+  double? hr;
+  double? rr;
+  double? rrms;
+  double? accX;
+  double? accY;
+  double? accZ;
+  double? ecg;
+
+  CombinedRowData({
+    required this.timestamp,
+    required this.deviceId,
+    this.hr,
+    this.rr,
+    this.rrms,
+    this.accX,
+    this.accY,
+    this.accZ,
+    this.ecg,
+  });
+
   List<dynamic> toCsvRow() {
-    // Konversi DateTime ke Unix Timestamp (dalam detik)
     final unixTimestamp = timestamp.millisecondsSinceEpoch ~/ 1000;
-    switch (type) {
-      case DataType.hr:
-        return [unixTimestamp, 'HR', value.toInt()];
-      case DataType.rr:
-        return [unixTimestamp, 'RR', value];
-      case DataType.ecg:
-        return [unixTimestamp, 'ECG', value];
-      case DataType.acc:
-        final x = additionalData['x'] ?? 0.0;
-        final y = additionalData['y'] ?? 0.0;
-        final z = additionalData['z'] ?? 0.0;
-        return [unixTimestamp, 'ACC', value, x, y, z];
-    }
-  }
-
-  // PERBAIKAN 1: Parse Unix Timestamp dari CSV
-  factory SensorData.fromCsvRow(List<dynamic> row) {
-    // Parse Unix Timestamp (dalam detik) kembali ke DateTime
-    final unixTimestamp = int.parse(row[0].toString());
-    final timestamp = DateTime.fromMillisecondsSinceEpoch(unixTimestamp * 1000);
-    final type = DataType.values.firstWhere(
-      (e) => e.toString().split('.').last.toUpperCase() == row[1].toString(),
-    );
-    final value = double.parse(row[2].toString());
-    Map<String, dynamic> additionalData = {};
-    if (type == DataType.acc && row.length > 5) {
-      additionalData = {
-        'x': double.parse(row[3].toString()),
-        'y': double.parse(row[4].toString()),
-        'z': double.parse(row[5].toString()),
-      };
-    }
-    return SensorData(
-      type: type,
-      value: value,
-      timestamp: timestamp,
-      additionalData: additionalData,
-    );
+    String fmt(double? v) => v != null ? v.toStringAsFixed(2) : '';
+    return [
+      unixTimestamp,
+      deviceId,
+      fmt(hr),
+      fmt(rr),
+      fmt(rrms),
+      fmt(accX),
+      fmt(accY),
+      fmt(accZ),
+      fmt(ecg),
+    ];
   }
 }
+
 
 class CsvHelper {
   static final CsvHelper _instance = CsvHelper._internal();
@@ -96,6 +96,11 @@ class CsvHelper {
 
   String? _csvFolderPath;
   String? _csvFilePath;
+  
+  // Store current values for combining into one row per second
+  CombinedRowData? _currentRow;
+  Timer? _csvWriteTimer;
+  String? _currentDeviceId;
 
   Future<String> get csvFolderPath async {
     if (_csvFolderPath != null) return _csvFolderPath!;
@@ -117,14 +122,13 @@ class CsvHelper {
         if (!await folder.exists()) {
           await folder.create(recursive: true);
         }
-        _csvFilePath = null; // Reset file path agar dibuat ulang dengan folder baru
+        _csvFilePath = null;
       }
     } catch (e) {
       print('Error selecting directory: $e');
     }
   }
 
-  // PERBAIKAN 2: Tidak membuat file baru jika sudah ada, hanya memastikan folder
   Future<String> get csvFilePath async {
     if (_csvFilePath != null) return _csvFilePath!;
     final folderPath = await csvFolderPath;
@@ -132,39 +136,118 @@ class CsvHelper {
     final dateString = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
     _csvFilePath = '$folderPath/polar_data_$dateString.csv';
 
-    // HANYA membuat file dan header JIKA file belum ada
     final file = File(_csvFilePath!);
     if (!await file.exists()) {
       await _createCsvWithHeaders();
     }
-    // Jika file sudah ada, biarkan saja, lanjutkan penambahan data
     return _csvFilePath!;
   }
 
-  // PERBAIKAN 2: Hanya membuat header jika file benar-benar baru
   Future<void> _createCsvWithHeaders() async {
     final file = File(await csvFilePath);
-    const headers = ['Timestamp', 'Type', 'Value', 'X', 'Y', 'Z'];
+    const headers = ['Timestamp', 'DeviceId', 'HR', 'RR', 'RRMS', 'ACC_X', 'ACC_Y', 'ACC_Z', 'ECG'];
     final csvData = const ListToCsvConverter().convert([headers]);
     await file.writeAsString(csvData);
   }
 
-  Future<void> appendSensorData(SensorData data) async {
-    final file = File(await csvFilePath);
-    // Read existing content
-    String existingContent = '';
-    if (await file.exists()) {
-      existingContent = await file.readAsString();
-    }
-    // Add new row
-    final newRow = data.toCsvRow();
-    final csvConverter = const ListToCsvConverter();
-    final newRowCsv = csvConverter.convert([newRow]);
-    // Append to file
-    final updatedContent = existingContent + newRowCsv;
-    await file.writeAsString(updatedContent);
+  // Start the 1-second CSV writing timer
+  void startPeriodicWriting(String deviceId) {
+    _currentDeviceId = deviceId;
+    _csvWriteTimer?.cancel();
+    _csvWriteTimer = Timer.periodic(Duration(seconds: 1), (timer) {
+      _writeCurrentRowToCSV();
+    });
   }
 
+  // Stop the CSV writing timer
+  void stopPeriodicWriting() {
+    _csvWriteTimer?.cancel();
+    _csvWriteTimer = null;
+    _currentRow = null;
+  }
+
+  // Modified method to update sensor data instead of immediately writing
+  Future<void> appendSensorData(SensorData data) async {
+    if (_currentDeviceId == null) return;
+    
+    // Initialize current row if needed
+    if (_currentRow == null || 
+        DateTime.now().difference(_currentRow!.timestamp).inSeconds >= 1) {
+      _currentRow = CombinedRowData(
+        timestamp: DateTime.now(),
+        deviceId: _currentDeviceId!,
+      );
+    }
+
+    // Update the current row with new sensor data
+    switch (data.type) {
+      case DataType.hr:
+        _currentRow!.hr = data.value;
+        break;
+      case DataType.rr:
+        _currentRow!.rr = data.value;
+        // Calculate RRMS if we have RR data (simplified version)
+        _updateRRMS(data.value);
+        break;
+      case DataType.ecg:
+        _currentRow!.ecg = data.value;
+        break;
+      case DataType.acc:
+        _currentRow!.accX = data.additionalData['x']?.toDouble();
+        _currentRow!.accY = data.additionalData['y']?.toDouble();
+        _currentRow!.accZ = data.additionalData['z']?.toDouble();
+        break;
+    }
+  }
+
+  List<double> _rrIntervals = [];
+  
+  void _updateRRMS(double rrValue) {
+    _rrIntervals.add(rrValue);
+    if (_rrIntervals.length > 30) {
+      _rrIntervals.removeAt(0);
+    }
+    
+    if (_rrIntervals.length >= 2) {
+      List<double> differences = [];
+      for (int i = 1; i < _rrIntervals.length; i++) {
+        differences.add(_rrIntervals[i] - _rrIntervals[i - 1]);
+      }
+      
+      if (differences.isNotEmpty) {
+        double sumSquares = differences.map((d) => d * d).reduce((a, b) => a + b);
+        double rrmsMeasure = sqrt(sumSquares / differences.length);
+        _currentRow?.rrms = double.parse(rrmsMeasure.toStringAsFixed(2));
+      }
+    }
+  }
+
+  // Write current row to CSV (called every second by timer)
+  Future<void> _writeCurrentRowToCSV() async {
+    if (_currentRow == null) return;
+
+    final file = File(await csvFilePath);
+
+    final newRow = _currentRow!.toCsvRow();
+    final csvConverter = const ListToCsvConverter();
+    final newRowCsv = csvConverter.convert([newRow]);
+
+    // Append langsung ke file, jangan rewrite semua
+    await file.writeAsString(
+      '\n$newRowCsv',
+      mode: FileMode.append,
+      flush: true,
+    );
+
+    // Reset untuk row berikutnya
+    _currentRow = CombinedRowData(
+      timestamp: DateTime.now(),
+      deviceId: _currentDeviceId!,
+    );
+  }
+
+
+  // Keep existing methods for backward compatibility but modify for new format
   Future<List<SensorData>> getAllSensorData({DataType? filterType, int? limit}) async {
     final file = File(await csvFilePath);
     if (!await file.exists()) {
@@ -174,27 +257,84 @@ class CsvHelper {
     if (csvContent.trim().isEmpty) {
       return [];
     }
+    
     final csvConverter = const CsvToListConverter();
     final rows = csvConverter.convert(csvContent);
-    // Skip header row and convert to SensorData objects
-    final dataRows = rows.skip(1).toList();
-    List<SensorData> sensorDataList = dataRows.map((row) {
+    final dataRows = rows.skip(1).toList(); // Skip header
+    
+    List<SensorData> sensorDataList = [];
+    
+    // Convert combined rows back to individual SensorData for UI compatibility
+    for (var row in dataRows) {
       try {
-        return SensorData.fromCsvRow(row);
+        final unixTimestamp = int.parse(row[0].toString());
+        final timestamp = DateTime.fromMillisecondsSinceEpoch(unixTimestamp * 1000);
+        
+        // Extract HR data
+        if (filterType == null || filterType == DataType.hr) {
+          if (row[2].toString().isNotEmpty) {
+            sensorDataList.add(SensorData(
+              type: DataType.hr,
+              value: double.parse(row[2].toString()),
+              timestamp: timestamp,
+            ));
+          }
+        }
+        
+        // Extract RR data
+        if (filterType == null || filterType == DataType.rr) {
+          if (row[3].toString().isNotEmpty) {
+            sensorDataList.add(SensorData(
+              type: DataType.rr,
+              value: double.parse(row[3].toString()),
+              timestamp: timestamp,
+            ));
+          }
+        }
+        
+        // Extract ECG data
+        if (filterType == null || filterType == DataType.ecg) {
+          if (row[8].toString().isNotEmpty) {
+            sensorDataList.add(SensorData(
+              type: DataType.ecg,
+              value: double.parse(row[8].toString()),
+              timestamp: timestamp,
+            ));
+          }
+        }
+        
+        // Extract ACC data
+        if (filterType == null || filterType == DataType.acc) {
+          if (row[5].toString().isNotEmpty && row[6].toString().isNotEmpty && row[7].toString().isNotEmpty) {
+            final x = double.parse(row[5].toString());
+            final y = double.parse(row[6].toString());
+            final z = double.parse(row[7].toString());
+            final magnitude = sqrt(x * x + y * y + z * z);
+            
+            sensorDataList.add(SensorData(
+              type: DataType.acc,
+              value: magnitude,
+              timestamp: timestamp,
+              additionalData: {'x': x, 'y': y, 'z': z},
+            ));
+          }
+        }
       } catch (e) {
         print('Error parsing row: $row, Error: $e');
-        return null;
       }
-    }).where((data) => data != null).cast<SensorData>().toList();
+    }
+    
     // Filter by type if specified
     if (filterType != null) {
       sensorDataList = sensorDataList.where((data) => data.type == filterType).toList();
     }
-    // Sort by timestamp (most recent first) and apply limit
+    
+    // Sort and limit
     sensorDataList.sort((a, b) => b.timestamp.compareTo(a.timestamp));
     if (limit != null) {
       sensorDataList = sensorDataList.take(limit).toList();
     }
+    
     return sensorDataList;
   }
 
@@ -204,6 +344,8 @@ class CsvHelper {
       await file.delete();
     }
     await _createCsvWithHeaders();
+    _currentRow = null;
+    _rrIntervals.clear();
   }
 
   Future<File> getCsvFile() async {
@@ -211,8 +353,15 @@ class CsvHelper {
   }
 
   Future<String> getDataCount() async {
-    final data = await getAllSensorData();
-    return data.length.toString();
+    final file = File(await csvFilePath);
+    if (!await file.exists()) return '0';
+    
+    final csvContent = await file.readAsString();
+    if (csvContent.trim().isEmpty) return '0';
+    
+    final csvConverter = const CsvToListConverter();
+    final rows = csvConverter.convert(csvContent);
+    return (rows.length - 1).toString(); // Subtract header row
   }
 
   String get currentFolderPath => _csvFolderPath ?? 'Not set';
@@ -297,6 +446,7 @@ class _PolarEnhancedMonitorState extends State<PolarEnhancedMonitor> with Ticker
         isConnected = true;
         isConnecting = false;
       });
+        _csvHelper.startPeriodicWriting(event.deviceId);
     });
 
     deviceDisconnectedSubscription = polar.deviceDisconnected.listen((event) {
@@ -307,6 +457,7 @@ class _PolarEnhancedMonitorState extends State<PolarEnhancedMonitor> with Ticker
         isStreaming.updateAll((key, value) => false);
         currentValues.updateAll((key, value) => 0);
       });
+        _csvHelper.stopPeriodicWriting();
     });
 
     sdkFeatureReadySubscription = polar.sdkFeatureReady.listen((event) {
@@ -431,7 +582,7 @@ class _PolarEnhancedMonitorState extends State<PolarEnhancedMonitor> with Ticker
           if (hrData.samples.isNotEmpty) {
             final heartRate = hrData.samples.first.hr.toDouble();
             final rrList = hrData.samples.first.rrsMs;
-            final rrInterval = (rrList != null && rrList.isNotEmpty)
+            final rrInterval = rrList.isNotEmpty
                 ? rrList.first.toDouble()
                 : 0.0;
             setState(() {
@@ -1121,7 +1272,6 @@ class _PolarEnhancedMonitorState extends State<PolarEnhancedMonitor> with Ticker
 
   Widget _buildCombinedChart() {
     List<Color> colors = [Colors.red, Colors.orange, Colors.purple, Colors.green];
-    List<String> labels = ['HR', 'RR', 'ECG', 'ACC'];
     List<LineChartBarData> series = [];
     for (int i = 0; i < DataType.values.length; i++) {
       final type = DataType.values[i];
