@@ -42,6 +42,12 @@ dependencies:
   path_provider: ^2.1.5
   file_picker: ^10.3.3
   fl_chart: ^0.68.0
+  shared_preferences: ^2.5.3
+  flutter_background_service: ^5.1.0
+  flutter_background_service_android: ^6.3.1
+  android_alarm_manager_plus: ^5.0.0
+  workmanager: ^0.7.0
+  http: ^1.5.0
 
 dependency_overrides:
   vector_math: 2.1.3
