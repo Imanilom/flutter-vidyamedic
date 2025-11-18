@@ -14,6 +14,7 @@ import 'dart:io';
 import 'dart:math';
 import 'login_page.dart';
 import 'health_questionnaire.dart';
+import 'auth_service.dart';
 
 enum DataType { hr, rr, ecg, acc }
 
@@ -577,15 +578,8 @@ Future<void> _stopBackgroundRecording() async {
     super.dispose();
   }
 
-  Future<void> _logout() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('isLoggedIn', false);
-    await prefs.remove('username');
-    await prefs.remove('loginTime');
-
-    _stopAllStreams();
-    _disconnectDevice();
-
+  void _logout() async {
+    await AuthService.logout();
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (context) => LoginPage()),
     );

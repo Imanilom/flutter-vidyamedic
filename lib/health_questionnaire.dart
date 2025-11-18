@@ -15,7 +15,7 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
   // Store all answers
   Map<String, dynamic> answers = {};
   
-  // Define all 13 questions
+  // Define all questions - original 13 + 7 IPAQ questions = 20 questions
   final List<Map<String, dynamic>> questions = [
     {
       'id': 'age',
@@ -23,7 +23,7 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
       'type': 'number',
       'subtitle': 'This helps us understand age-related health patterns',
       'required': true,
-      'min': 13,
+      'min': 15,
       'max': 120,
     },
     {
@@ -52,6 +52,78 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
       'min': 30,
       'max': 300,
     },
+    // IPAQ QUESTIONS START HERE
+    {
+      'id': 'ipaq_vigorous_days',
+      'title': 'During the last 7 days, on how many days did you do VIGOROUS physical activities?',
+      'type': 'number',
+      'subtitle': 'Vigorous activities: heavy lifting, digging, aerobics, or fast bicycling (at least 10 minutes at a time)',
+      'required': true,
+      'min': 0,
+      'max': 7,
+      'skipLogic': {
+        'condition': 'equals',
+        'value': 0,
+        'skipTo': 'ipaq_moderate_days'
+      }
+    },
+    {
+      'id': 'ipaq_vigorous_time',
+      'title': 'How much time did you usually spend doing VIGOROUS physical activities on one of those days?',
+      'type': 'time_input',
+      'subtitle': 'Please enter hours and minutes you spent on vigorous activities per day',
+      'required': true,
+    },
+    {
+      'id': 'ipaq_moderate_days',
+      'title': 'During the last 7 days, on how many days did you do MODERATE physical activities?',
+      'type': 'number',
+      'subtitle': 'Moderate activities: carrying light loads, bicycling at regular pace, doubles tennis (at least 10 minutes at a time). Do not include walking.',
+      'required': true,
+      'min': 0,
+      'max': 7,
+      'skipLogic': {
+        'condition': 'equals',
+        'value': 0,
+        'skipTo': 'ipaq_walking_days'
+      }
+    },
+    {
+      'id': 'ipaq_moderate_time',
+      'title': 'How much time did you usually spend doing MODERATE physical activities on one of those days?',
+      'type': 'time_input',
+      'subtitle': 'Please enter hours and minutes you spent on moderate activities per day',
+      'required': true,
+    },
+    {
+      'id': 'ipaq_walking_days',
+      'title': 'During the last 7 days, on how many days did you walk for at least 10 minutes at a time?',
+      'type': 'number',
+      'subtitle': 'Include walking at work, home, travel, and for recreation/sport/exercise',
+      'required': true,
+      'min': 0,
+      'max': 7,
+      'skipLogic': {
+        'condition': 'equals',
+        'value': 0,
+        'skipTo': 'ipaq_sitting_time'
+      }
+    },
+    {
+      'id': 'ipaq_walking_time',
+      'title': 'How much time did you usually spend walking on one of those days?',
+      'type': 'time_input',
+      'subtitle': 'Please enter hours and minutes you spent walking per day',
+      'required': true,
+    },
+    {
+      'id': 'ipaq_sitting_time',
+      'title': 'During the last 7 days, how much time did you spend sitting on a week day?',
+      'type': 'time_input',
+      'subtitle': 'Include time at work, home, coursework, leisure (sitting at desk, visiting friends, reading, watching TV)',
+      'required': true,
+    },
+    // ORIGINAL QUESTIONS CONTINUE
     {
       'id': 'activity_level',
       'title': 'How would you describe your physical activity level?',
@@ -209,16 +281,40 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
     await prefs.setString('health_questionnaire_answers', json.encode(answers));
   }
 
+  void _handleSkipLogic(int currentIndex) {
+    final currentQuestion = questions[currentIndex];
+    if (currentQuestion.containsKey('skipLogic')) {
+      final skipLogic = currentQuestion['skipLogic'];
+      final currentAnswer = answers[currentQuestion['id']];
+      
+      if (skipLogic['condition'] == 'equals' && currentAnswer == skipLogic['value']) {
+        final skipToId = skipLogic['skipTo'];
+        final skipToIndex = questions.indexWhere((q) => q['id'] == skipToId);
+        
+        if (skipToIndex != -1 && skipToIndex > currentIndex) {
+          setState(() {
+            currentQuestionIndex = skipToIndex;
+          });
+          _pageController.jumpToPage(skipToIndex);
+        }
+      }
+    }
+  }
+
   Future<void> _submitQuestionnaire() async {
     setState(() {
       isLoading = true;
     });
 
     try {
+      // Calculate IPAQ score
+      final ipaqScore = _calculateIPAQScore();
+      
       // Save completion timestamp
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('health_questionnaire_completed', DateTime.now().toIso8601String());
       await prefs.setString('health_questionnaire_final_answers', json.encode(answers));
+      await prefs.setInt('ipaq_score', ipaqScore);
 
       // Show success dialog
       showDialog(
@@ -232,6 +328,15 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
               Icon(Icons.check_circle, color: Colors.green, size: 64),
               SizedBox(height: 16),
               Text('Thank you for completing the health questionnaire. Your responses have been saved and will help provide better health insights.'),
+              SizedBox(height: 16),
+              Text(
+                'IPAQ Score: $ipaqScore MET-min/week',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                  color: Colors.blue.shade700,
+                ),
+              ),
             ],
           ),
           actions: [
@@ -256,9 +361,55 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
     }
   }
 
+  int _calculateIPAQScore() {
+    // IPAQ scoring calculation based on guidelines
+    int vigorousDays = answers['ipaq_vigorous_days'] ?? 0;
+    int moderateDays = answers['ipaq_moderate_days'] ?? 0;
+    int walkingDays = answers['ipaq_walking_days'] ?? 0;
+    
+    // Convert time inputs to minutes
+    int vigorousMinutes = _convertTimeToMinutes(answers['ipaq_vigorous_time']);
+    int moderateMinutes = _convertTimeToMinutes(answers['ipaq_moderate_time']);
+    int walkingMinutes = _convertTimeToMinutes(answers['ipaq_walking_time']);
+    
+    // MET values according to IPAQ guidelines
+    const int vigorousMET = 8;
+    const int moderateMET = 4;
+    const double walkingMET = 3.3;
+    
+    // Calculate MET-min/week for each category
+    int vigorousMETMin = vigorousDays * vigorousMinutes * vigorousMET;
+    int moderateMETMin = moderateDays * moderateMinutes * moderateMET;
+    int walkingMETMin = walkingDays * walkingMinutes * walkingMET.toInt();
+    
+    // Total physical activity = sum of all categories
+    return vigorousMETMin + moderateMETMin + walkingMETMin;
+  }
+
+  int _convertTimeToMinutes(dynamic timeData) {
+    if (timeData is Map) {
+      int hours = timeData['hours'] ?? 0;
+      int minutes = timeData['minutes'] ?? 0;
+      return (hours * 60) + minutes;
+    }
+    return 0;
+  }
+
   bool _isQuestionAnswered(int index) {
     final question = questions[index];
-    return answers.containsKey(question['id']) && answers[question['id']] != null;
+    final answer = answers[question['id']];
+    
+    if (answer == null) return false;
+    
+    // Special handling for time input type
+    if (question['type'] == 'time_input') {
+      if (answer is Map) {
+        return (answer['hours'] ?? 0) > 0 || (answer['minutes'] ?? 0) > 0;
+      }
+      return false;
+    }
+    
+    return true;
   }
 
   bool _canProceed() {
@@ -271,13 +422,19 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
 
   void _nextQuestion() {
     if (currentQuestionIndex < questions.length - 1) {
-      setState(() {
-        currentQuestionIndex++;
-      });
-      _pageController.nextPage(
-        duration: Duration(milliseconds: 300),
-        curve: Curves.easeInOut,
-      );
+      // Apply skip logic before moving to next question
+      _handleSkipLogic(currentQuestionIndex);
+      
+      // Only proceed if we're not skipping
+      if (currentQuestionIndex < questions.length - 1) {
+        setState(() {
+          currentQuestionIndex++;
+        });
+        _pageController.nextPage(
+          duration: Duration(milliseconds: 300),
+          curve: Curves.easeInOut,
+        );
+      }
     }
   }
 
@@ -306,6 +463,8 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
         return _buildMultipleChoiceQuestion(question, currentAnswer);
       case 'scale':
         return _buildScaleQuestion(question, currentAnswer);
+      case 'time_input':
+        return _buildTimeInputQuestion(question, currentAnswer);
       default:
         return Container();
     }
@@ -323,7 +482,7 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
           controller: controller,
           keyboardType: TextInputType.number,
           decoration: InputDecoration(
-            labelText: 'Enter value',
+            labelText: 'Enter number of days (0-7)',
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
             filled: true,
             fillColor: Colors.grey.shade50,
@@ -347,6 +506,106 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
               style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
             ),
           ),
+      ],
+    );
+  }
+
+  Widget _buildTimeInputQuestion(Map<String, dynamic> question, dynamic currentAnswer) {
+    Map<String, int> timeData = {
+      'hours': 0,
+      'minutes': 0,
+    };
+    
+    if (currentAnswer is Map) {
+      timeData = Map<String, int>.from(currentAnswer);
+    }
+
+    return Column(
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Column(
+                children: [
+                  Text('Hours'),
+                  SizedBox(height: 8),
+                  DropdownButtonFormField<int>(
+                    value: timeData['hours'],
+                    items: List.generate(25, (index) => index)
+                        .map((hour) => DropdownMenuItem(
+                              value: hour,
+                              child: Text('$hour hours'),
+                            ))
+                        .toList(),
+                    onChanged: (value) {
+                      setState(() {
+                        timeData['hours'] = value ?? 0;
+                        _saveAnswer(question['id'], timeData);
+                      });
+                    },
+                    decoration: InputDecoration(
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                      filled: true,
+                      fillColor: Colors.grey.shade50,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                children: [
+                  Text('Minutes'),
+                  SizedBox(height: 8),
+                  DropdownButtonFormField<int>(
+                    value: timeData['minutes'],
+                    items: List.generate(60, (index) => index)
+                        .map((minute) => DropdownMenuItem(
+                              value: minute,
+                              child: Text('$minute min'),
+                            ))
+                        .toList(),
+                    onChanged: (value) {
+                      setState(() {
+                        timeData['minutes'] = value ?? 0;
+                        _saveAnswer(question['id'], timeData);
+                      });
+                    },
+                    decoration: InputDecoration(
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                      filled: true,
+                      fillColor: Colors.grey.shade50,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        SizedBox(height: 16),
+        Container(
+          padding: EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: Colors.blue.shade50,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.info_outline, color: Colors.blue.shade700),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Total: ${timeData['hours']} hours ${timeData['minutes']} minutes',
+                  style: TextStyle(
+                    color: Colors.blue.shade700,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ],
     );
   }
@@ -416,9 +675,9 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text('$min'),
+            Text('$min (Very low)'),
             Text('Current: ${value.round()}'),
-            Text('$max'),
+            Text('$max (Very high)'),
           ],
         ),
       ],
@@ -431,7 +690,7 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Text('Health Questionnaire'),
+        title: Text('Health & Physical Activity Questionnaire'),
         backgroundColor: Colors.blue.shade600,
         foregroundColor: Colors.white,
         elevation: 0,
@@ -475,6 +734,7 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
           Expanded(
             child: PageView.builder(
               controller: _pageController,
+              physics: NeverScrollableScrollPhysics(), // Disable swipe
               onPageChanged: (index) {
                 setState(() {
                   currentQuestionIndex = index;
@@ -493,6 +753,32 @@ class _HealthQuestionnairePageState extends State<HealthQuestionnairePage> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          // IPAQ badge for IPAQ questions
+                          if (question['id'].startsWith('ipaq'))
+                            Container(
+                              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: Colors.green.shade100,
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.fitness_center, size: 16, color: Colors.green.shade800),
+                                  SizedBox(width: 4),
+                                  Text(
+                                    'IPAQ',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.green.shade800,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          if (question['id'].startsWith('ipaq')) SizedBox(height: 8),
+                          
                           Text(
                             question['title'],
                             style: TextStyle(
